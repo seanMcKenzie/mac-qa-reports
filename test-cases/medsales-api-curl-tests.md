@@ -1,6 +1,7 @@
 # MedSales API — Comprehensive curl Test Cases
 **Author:** Mac McDonald, QA Engineer  
 **Created:** 2026-03-12  
+**Updated:** 2026-03-20 — Sprint 6 DMEPOS test cases added (TC-39–TC-48)
 **API Version:** v1  
 
 ---
@@ -64,6 +65,16 @@ BASE_URL=http://localhost:8080
 | TC-36 | Admin / NPPES | Trigger NPPES refresh (local/ADMIN) | 202 |
 | TC-37 | Admin / NPPES | Trigger refresh without ADMIN role | 403 |
 | TC-38 | Error Cases | Unknown route (404) | 404 |
+| TC-39 | DMEPOS | Snell DMEPOS items (1 item) | 200 |
+| TC-40 | DMEPOS | Hirsch DMEPOS items (18 items) | 200 |
+| TC-41 | DMEPOS | Unknown NPI DMEPOS | 404 |
+| TC-42 | DMEPOS | Physician detail includes dmeposSummary | 200 |
+| TC-43 | DMEPOS Search | Filter by dmeposCode (A6196) | 200 |
+| TC-44 | DMEPOS Search | Filter by dmeposCode + minDmeposClaims | 200 |
+| TC-45 | DMEPOS Search | High minDmeposClaims threshold (empty) | 200 (empty) |
+| TC-46 | DMEPOS Search | Physician with no DMEPOS data — dmeposSummary null | 200 |
+| TC-47 | DMEPOS Search | Invalid dmeposCode format | 200 (empty) or 400 |
+| TC-48 | DMEPOS Search | dmeposCode + size pagination | 200 |
 
 ---
 
@@ -715,6 +726,180 @@ curl -s -o /dev/null -w "%{http_code}" \
 }
 ```
 **Notes:** Verifies Spring's default error handling is working. Should NOT return a Whitelabel error page with stack trace. If it does — configure `server.error.include-stacktrace=never` in production.
+
+---
+
+## 9. Sprint 6 — DMEPOS Endpoints
+
+> **Auth required:** All DMEPOS endpoints require a valid JWT. Obtain a token first:
+> ```bash
+> TOKEN=$(curl -s -X POST "http://localhost:8180/realms/medsales-dev/protocol/openid-connect/token" \
+>   -H "Content-Type: application/x-www-form-urlencoded" \
+>   -d "grant_type=password&client_id=medsales-api&username=testrep@medsales.dev&password=password" \
+>   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+> ```
+> **Reference NPIs:**
+> - `1225021702` — Brian Snell, MD (Neurological Surgery) — 1 DMEPOS item
+> - `1417988957` — Jeffrey Hirsch, MD (Family Medicine) — 18 DMEPOS items
+
+### TC-39 — DMEPOS items for Snell (1 item)
+**Description:** Retrieve DMEPOS referral data for Brian Snell. Should return exactly 1 item.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/1225021702/dmepos"
+```
+**Expected status:** `200`  
+**Expected response:**
+```json
+{
+  "npi": "1225021702",
+  "items": [
+    {
+      "hcpcsCode": "E0745",
+      "hcpcsDescription": "Neuromuscular stimulator, electronic shock unit",
+      "totalClaims": 11,
+      "totalBeneficiaries": 0,
+      "avgMedicarePayment": <number>
+    }
+  ]
+}
+```
+**Notes:** Confirm `items` array has exactly 1 element. Confirm `hcpcsCode` is `E0745`.
+
+---
+
+### TC-40 — DMEPOS items for Hirsch (18 items)
+**Description:** Retrieve DMEPOS referral data for Jeffrey Hirsch. Should return 18 items (CPAP and wound care supplies).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/1417988957/dmepos"
+```
+**Expected status:** `200`  
+**Expected response:** `items` array with 18 elements, including `E0601` (CPAP) and `A6196` (alginate dressing).  
+**Notes:** Hirsch is the primary DMEPOS test physician. Verify item count exactly = 18.
+
+---
+
+### TC-41 — DMEPOS for unknown NPI
+**Description:** Request DMEPOS data for a valid-format NPI that doesn't exist.
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/9999999999/dmepos"
+```
+**Expected status:** `404`  
+**Notes:** Should return structured error, not a 500.
+
+---
+
+### TC-42 — Physician detail includes dmeposSummary
+**Description:** GET /physicians/:npi for Snell should include `dmeposSummary` object (not null) since he has DMEPOS data.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/1225021702"
+```
+**Expected status:** `200`  
+**Expected response (excerpt):**
+```json
+{
+  "npi": "1225021702",
+  "dmeposSummary": {
+    "totalReferrals": 1,
+    "totalClaims": 11,
+    "totalBeneficiaries": 0,
+    "topItem": "E0745 — Neuromuscular stimulator, electronic shock unit"
+  }
+}
+```
+**Notes:** `dmeposSummary` must be present and non-null. Verify `totalReferrals` = 1.
+
+---
+
+### TC-43 — Search by DMEPOS code (A6196)
+**Description:** Filter physician search by DMEPOS HCPCS code A6196 (alginate wound dressing).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/search?latitude=35.4676&longitude=-97.5164&dmeposCode=A6196&size=5"
+```
+**Expected status:** `200`  
+**Expected response:** Results array containing only physicians who refer A6196. Verify by spot-checking NPI `/dmepos` endpoint.  
+**Notes:** All returned physicians must have A6196 in their DMEPOS items — random spot-check verification recommended. Hirsch (NPI `1417988957`) should appear if within radius.
+
+---
+
+### TC-44 — Search by DMEPOS code + minDmeposClaims
+**Description:** Filter by code AND minimum claim threshold (≥10 claims for A6196).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/search?latitude=35.4676&longitude=-97.5164&dmeposCode=A6196&minDmeposClaims=10&size=5"
+```
+**Expected status:** `200`  
+**Expected response:** Narrower result set than TC-43 — only physicians with ≥10 A6196 claims.  
+**Notes:** Danley (NPI `1124193255`) has 20 A6196 claims — should appear. Physicians with <10 claims should be excluded.
+
+---
+
+### TC-45 — minDmeposClaims threshold filters out all results
+**Description:** Set an impossibly high claim threshold to verify the filter actually excludes results.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/search?latitude=35.4676&longitude=-97.5164&dmeposCode=A6196&minDmeposClaims=100&size=5"
+```
+**Expected status:** `200`  
+**Expected response:**
+```json
+{ "results": [] }
+```
+**Notes:** Confirms minDmeposClaims filtering is not a no-op. Should return 0 results with threshold=100.
+
+---
+
+### TC-46 — Physician with no DMEPOS data — dmeposSummary should be null
+**Description:** Fetch a physician who has no DMEPOS referral history. The `dmeposSummary` field should be null or absent.
+
+```bash
+# Use a physician known to have no DMEPOS data
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/1154404648"
+```
+**Expected status:** `200`  
+**Expected response:**
+```json
+{ "dmeposSummary": null }
+```
+**Notes:** Verifies the field is included but null (not missing entirely). Absence of the field is also acceptable — document the actual behavior.
+
+---
+
+### TC-47 — Invalid DMEPOS code format
+**Description:** Search with a clearly invalid DMEPOS code.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/search?latitude=35.4676&longitude=-97.5164&dmeposCode=INVALID_CODE&size=5"
+```
+**Expected status:** `200` (empty results) or `400` (validation error)  
+**Notes:** Document actual behavior. An empty results set (200) is acceptable if no validation exists. A 400 with clear error message is preferred. A 500 is a bug.
+
+---
+
+### TC-48 — DMEPOS code search with pagination
+**Description:** Verify pagination works correctly with DMEPOS code filter.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "${BASE_URL}/api/v1/physicians/search?latitude=35.4676&longitude=-97.5164&dmeposCode=A6196&size=3"
+```
+**Expected status:** `200`  
+**Expected response:** Exactly 3 results (or fewer if <3 match).  
+**Notes:** Confirm `size` param is respected alongside DMEPOS filter.
 
 ---
 
